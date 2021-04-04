@@ -1,4 +1,4 @@
-use image::{ColorType, png::PNGEncoder};
+use image::{png::PNGEncoder, ColorType};
 use num::Complex;
 use std::{fs::File, str::FromStr};
 
@@ -8,26 +8,37 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() != 5 {
-        eprintln!("Usage: {} FILE PIXELS UPPERLEFT LOWERRIGHT",
-                  args[0]);
-        eprintln!("Example: {} mandel.png 1000x750 -1.20,0.35 -1,0.20",
-                  args[0]);
+        eprintln!("Usage: {} FILE PIXELS UPPERLEFT LOWERRIGHT", args[0]);
+        eprintln!(
+            "Example: {} mandel.png 1000x750 -1.20,0.35 -1,0.20",
+            args[0]
+        );
         std::process::exit(1);
     }
 
-    let bounds = parse_pair(&args[2], 'x')
-        .expect("error parsing image dimensions");
-    let upper_left = parse_complex(&args[3])
-        .expect("error parsing upper left corner point");
-    let lower_right = parse_complex(&args[4])
-        .expect("error parsing lower right corner point");
+    let bounds = parse_pair(&args[2], 'x').expect("error parsing image dimensions");
+    let ul = parse_complex(&args[3]).expect("error parsing upper left corner point");
+    let lr = parse_complex(&args[4]).expect("error parsing lower right corner point");
 
     let mut pixels = vec![0; bounds.0 * bounds.1];
 
-    render(&mut pixels, bounds, upper_left, lower_right);
+    let threads = num_cpus::get();
+    let rows_per_band = bounds.1 / threads + 1;
+    {
+        let bands: Vec<&mut [u8]> = pixels.chunks_mut(rows_per_band * bounds.0).collect();
 
-    write_image(&args[1], &pixels, bounds)
-        .expect("error writing PNG file");
+        crossbeam::scope(|spawner| {
+            for (i, band) in bands.into_iter().enumerate() {
+                let top = rows_per_band * i;
+                let height = band.len() / bounds.0;
+                let band_bounds = (bounds.0, height);
+                let band_ul = pixel_to_point(bounds, (0, top), ul, lr);
+                let band_lr = pixel_to_point(bounds, (bounds.0, height + top), ul, lr);
+                spawner.spawn(move || render(band, band_bounds, band_ul, band_lr));
+            }
+        });
+    }
+    write_image(&args[1], &pixels, bounds).expect("error writing PNG file");
 }
 
 fn escape_time(c: Complex<f64>, limit: usize) -> Option<usize> {
@@ -54,7 +65,7 @@ fn parse_pair<T: FromStr>(s: &str, separator: char) -> Option<(T, T)> {
 fn parse_complex(s: &str) -> Option<Complex<f64>> {
     match parse_pair(s, ',') {
         Some((re, im)) => Some(Complex { re, im }),
-        None => None
+        None => None,
     }
 }
 
@@ -92,16 +103,20 @@ fn render(pixels: &mut [u8], bounds: (usize, usize), ul: Complex<f64>, lr: Compl
             pixels[row * bounds.0 + col] =
                 match escape_time(pixel_to_point(bounds, (col, row), ul, lr), 255) {
                     Some(i) => 255 - i as u8,
-                    None => 0
+                    None => 0,
                 }
         }
     }
 }
 
-
 fn write_image(fname: &str, pixels: &[u8], bounds: (usize, usize)) -> Result<(), std::io::Error> {
     let output = File::create(fname)?;
     let encoder = PNGEncoder::new(output);
-    encoder.encode(&pixels, bounds.0 as u32, bounds.1 as u32, ColorType::Gray(8))?;
+    encoder.encode(
+        &pixels,
+        bounds.0 as u32,
+        bounds.1 as u32,
+        ColorType::Gray(8),
+    )?;
     Ok(())
 }
